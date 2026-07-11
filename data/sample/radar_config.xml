@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sample NXP SAF85xx-style FMCW radar configuration.
+  Adjust tag names in src/radar/config.py if your export uses different naming.
+-->
+<RadarConfiguration platform="SAF85xx">
+  <RF>
+    <centerFreq unit="Hz">77000000000</centerFreq>
+    <bandwidth unit="Hz">1000000000</bandwidth>
+    <chirpSlope unit="Hz/s">25000000000000</chirpSlope>
+  </RF>
+
+  <ChirpProfile>
+    <numAdcSamples>1024</numAdcSamples>
+    <numChirps>128</numChirps>
+    <rampTime unit="s">0.0000256</rampTime>
+    <idleTime unit="s">0.000010</idleTime>
+    <adcSampleRate unit="Hz">40000000</adcSampleRate>
+  </ChirpProfile>
+
+  <Antenna>
+    <numRx>4</numRx>
+    <rxSpacing unit="m">0.0019</rxSpacing>
+  </Antenna>
+
+  <Processing>
+    <rangeFftSize>1024</rangeFftSize>
+    <dopplerFftSize>128</dopplerFftSize>
+    <angleFftSize>64</angleFftSize>
+  </Processing>
+
+  <DataFormat>
+    <dataType>int16</dataType>
+  </DataFormat>
+</RadarConfiguration>
