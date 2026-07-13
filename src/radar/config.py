@@ -64,7 +64,13 @@ _DTYPE_MAP = {
 
 @dataclass
 class RadarConfig:
-    """FMCW radar frame configuration."""
+    """
+    FMCW radar frame configuration.
+
+    Holds chirp timing, ADC dimensions, RF parameters, and optional FFT sizes.
+    Derived quantities (wavelength, range resolution, max range, etc.) are
+    exposed as read-only properties.
+    """
 
     center_freq_hz: float = 77e9
     bandwidth_hz: float = 1e9
@@ -83,36 +89,44 @@ class RadarConfig:
 
     @property
     def wavelength_m(self) -> float:
+        """Carrier wavelength in metres (c / fc)."""
         return SPEED_OF_LIGHT / self.center_freq_hz
 
     @property
     def chirp_slope(self) -> float:
+        """Chirp slope in Hz/s; computed from bandwidth / ramp time if not set explicitly."""
         if self.chirp_slope_hz_per_s is not None:
             return self.chirp_slope_hz_per_s
         return self.bandwidth_hz / self.chirp_duration_s
 
     @property
     def chirp_period_s(self) -> float:
+        """Total chirp period including idle time between chirps."""
         return self.chirp_duration_s + self.idle_time_s
 
     @property
     def range_resolution_m(self) -> float:
+        """Theoretical range resolution: c / (2 × bandwidth)."""
         return SPEED_OF_LIGHT / (2.0 * self.bandwidth_hz)
 
     @property
     def max_range_m(self) -> float:
+        """Maximum unambiguous range from ADC sample rate and chirp slope."""
         return (self.adc_sample_rate_hz * SPEED_OF_LIGHT) / (2.0 * self.chirp_slope)
 
     @property
     def doppler_resolution_mps(self) -> float:
+        """Velocity resolution across the full frame (wavelength / 2T_frame)."""
         frame_time = self.num_chirps * self.chirp_period_s
         return self.wavelength_m / (2.0 * frame_time)
 
     @property
     def max_velocity_mps(self) -> float:
+        """Maximum unambiguous velocity (wavelength / 4T_chirp)."""
         return self.wavelength_m / (4.0 * self.chirp_period_s)
 
     def summary(self) -> str:
+        """Return a one-line human-readable summary of key config parameters."""
         return (
             f"RadarConfig({self.num_samples} samples × {self.num_chirps} chirps × "
             f"{self.num_rx} RX | fc={self.center_freq_hz/1e9:.2f} GHz, "
@@ -123,14 +137,17 @@ class RadarConfig:
 
     @classmethod
     def from_xml(cls, path: str | Path) -> RadarConfig:
+        """Load configuration from an XML file (delegates to ``load_config``)."""
         return load_config(path)
 
 
 def _local_name(tag: str) -> str:
+    """Strip XML namespace prefix from an element tag name."""
     return tag.split("}")[-1] if "}" in tag else tag
 
 
 def _parse_value(raw: str) -> int | float | str:
+    """Parse a string leaf value as int, float, or plain string."""
     text = raw.strip()
     if not text:
         return text
@@ -143,6 +160,7 @@ def _parse_value(raw: str) -> int | float | str:
 
 
 def _collect_params(root: ET.Element) -> dict[str, Any]:
+    """Walk an XML tree and flatten leaf text/attributes into a parameter dict."""
     params: dict[str, Any] = {}
 
     def walk(elem: ET.Element, prefix: str = "") -> None:
@@ -162,6 +180,7 @@ def _collect_params(root: ET.Element) -> dict[str, Any]:
 
 
 def _resolve(params: dict[str, Any], canonical: str) -> Any | None:
+    """Look up a canonical parameter name using vendor-specific XML aliases."""
     for alias in _PARAM_ALIASES.get(canonical, [canonical]):
         if alias in params:
             return params[alias]
@@ -169,7 +188,12 @@ def _resolve(params: dict[str, Any], canonical: str) -> Any | None:
 
 
 def load_config(path: str | Path) -> RadarConfig:
-    """Load radar configuration from an XML file."""
+    """
+    Load radar configuration from an XML file.
+
+    Supports flexible tag names via ``_PARAM_ALIASES`` so vendor exports
+    (NXP, TI, custom) map onto the canonical ``RadarConfig`` fields.
+    """
     tree = ET.parse(Path(path))
     params = _collect_params(tree.getroot())
     cfg = RadarConfig()
@@ -199,6 +223,7 @@ def load_config(path: str | Path) -> RadarConfig:
 
 
 def _as_real_cube(cube: np.ndarray) -> np.ndarray:
+    """Cast cube to real float32; reject complex-valued input."""
     if np.iscomplexobj(cube):
         raise ValueError("Expected real ADC samples, got complex data")
     return cube.astype(np.float32, copy=False)
@@ -206,13 +231,18 @@ def _as_real_cube(cube: np.ndarray) -> np.ndarray:
 
 @dataclass
 class RadarDataCube:
-    """Real ADC radar cube with shape (samples, chirps, rx)."""
+    """
+    Real ADC radar cube bundled with its configuration.
+
+    Data layout: ``(num_samples, num_chirps, num_rx)``.
+    """
 
     data: np.ndarray
     config: RadarConfig
 
     @property
     def shape(self) -> tuple[int, ...]:
+        """Shape of the underlying data array."""
         return self.data.shape
 
     @classmethod
@@ -224,6 +254,11 @@ class RadarDataCube:
         offset_bytes: int = 0,
         scale: float = 1.0,
     ) -> RadarDataCube:
+        """
+        Load a cube from disk and wrap it with the given config.
+
+        See ``load_radar_cube`` for supported file formats.
+        """
         return cls(
             data=load_radar_cube(path, config, offset_bytes=offset_bytes, scale=scale),
             config=config,
@@ -238,6 +273,11 @@ class RadarDataCube:
         snr_db: float = 25.0,
         seed: int = 42,
     ) -> RadarDataCube:
+        """
+        Generate a synthetic cube for testing and return it wrapped with config.
+
+        Each target is ``(range_m, velocity_mps, angle_deg)``.
+        """
         return cls(
             data=generate_synthetic_cube(config, targets=targets, snr_db=snr_db, seed=seed),
             config=config,
@@ -245,7 +285,7 @@ class RadarDataCube:
 
 
 class RadarDataIO:
-    """I/O helpers for FMCW radar cubes."""
+    """Static I/O helpers for loading or synthesizing radar cubes as raw arrays."""
 
     @staticmethod
     def load(
@@ -255,6 +295,11 @@ class RadarDataIO:
         offset_bytes: int = 0,
         scale: float = 1.0,
     ) -> np.ndarray:
+        """
+        Load a raw cube array from disk.
+
+        Returns shape ``(samples, chirps, rx)`` as float32.
+        """
         return load_radar_cube(path, config, offset_bytes=offset_bytes, scale=scale)
 
     @staticmethod
@@ -265,6 +310,11 @@ class RadarDataIO:
         snr_db: float = 25.0,
         seed: int = 42,
     ) -> np.ndarray:
+        """
+        Generate a synthetic cube array for pipeline validation.
+
+        Returns shape ``(samples, chirps, rx)`` as float32.
+        """
         return generate_synthetic_cube(config, targets=targets, snr_db=snr_db, seed=seed)
 
 
@@ -275,7 +325,12 @@ def load_radar_cube(
     offset_bytes: int = 0,
     scale: float = 1.0,
 ) -> np.ndarray:
-    """Load raw cube as (samples, chirps, rx). Supports .npy, .bin, .raw."""
+    """
+    Load a raw radar cube and reshape to ``(samples, chirps, rx)``.
+
+    Supports ``.npy`` (pre-shaped 3D) and flat binary ``.bin`` / ``.raw``.
+    Binary layout default: ``[rx][chirp][sample]`` interleaved.
+    """
     path = Path(path)
     suffix = path.suffix.lower()
 
@@ -306,7 +361,12 @@ def generate_synthetic_cube(
     snr_db: float = 25.0,
     seed: int = 42,
 ) -> np.ndarray:
-    """Generate synthetic real-valued cube. Targets: (range_m, velocity_mps, angle_deg)."""
+    """
+    Generate a synthetic real-valued FMCW radar cube.
+
+    Models beat-frequency cosines with array phase steering and additive
+    Gaussian noise. Each target is ``(range_m, velocity_mps, angle_deg)``.
+    """
     rng = np.random.default_rng(seed)
     ns, nc, nr = config.num_samples, config.num_chirps, config.num_rx
     if targets is None:

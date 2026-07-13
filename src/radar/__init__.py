@@ -28,6 +28,8 @@ from .testing import (
     compute_rx_stats,
     compute_rx_correlation,
     compute_rx_correlation_matrix,
+    compute_rx_group_delay_matrix,
+    compute_rx_group_delay_samples,
 )
 from .visualization import (
     MatplotlibRadarPlotter,
@@ -76,6 +78,8 @@ __all__ = [
     "compute_rx_stats",
     "compute_rx_correlation",
     "compute_rx_correlation_matrix",
+    "compute_rx_group_delay_matrix",
+    "compute_rx_group_delay_samples",
     "plot_raw_adc_chirp",
     "plot_range_profile",
     "plot_range_doppler",
