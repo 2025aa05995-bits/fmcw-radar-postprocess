@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Sample NXP SAF85xx-style FMCW radar configuration.
-  Adjust tag names in src/radar/config.py if your export uses different naming.
+  Adjust tag names in src/radar/devices/base.py if your export uses different naming.
 -->
 <RadarConfiguration platform="SAF85xx">
   <RF>

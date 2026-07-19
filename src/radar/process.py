@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import windows
 
-from .config import (
+from .devices import (
     SPEED_OF_LIGHT,
     RadarConfig,
     RadarDataCube,
@@ -171,6 +171,29 @@ class RadarProcessor:
                 mask[ri, di] = rd_map[ri, di] > thresh
         return mask, threshold
 
+    def compute_beat_freq_axis(
+        self,
+        n_bins: int,
+        *,
+        n_fft: int | None = None,
+        unit: str = "hz",
+    ) -> np.ndarray:
+        """
+        Convert range FFT bin indices to beat frequency.
+
+        ``unit`` is ``\"hz\"`` or ``\"mhz\"``. Valid for positive beat frequencies
+        from ``rfft`` (real ADC input).
+        """
+        config = self.config
+        n_fft = n_fft or _range_n_fft(config, None)
+        freq_res = config.adc_sample_rate_hz / n_fft
+        freqs_hz = np.arange(n_bins) * freq_res
+        if unit.lower() == "mhz":
+            return freqs_hz / 1e6
+        if unit.lower() == "hz":
+            return freqs_hz
+        raise ValueError(f"Unsupported beat-frequency unit: {unit!r}")
+
     def compute_range_axis(self, n_bins: int, *, n_fft: int | None = None) -> np.ndarray:
         """
         Convert range FFT bin indices to metres.
@@ -178,11 +201,8 @@ class RadarProcessor:
         Uses beat frequency from ``rfft`` bins and chirp slope; valid for
         positive beat frequencies only.
         """
-        config = self.config
-        n_fft = n_fft or _range_n_fft(config, None)
-        freq_res = config.adc_sample_rate_hz / n_fft
-        freqs = np.arange(n_bins) * freq_res
-        return freqs * SPEED_OF_LIGHT / (2.0 * config.chirp_slope)
+        freqs = self.compute_beat_freq_axis(n_bins, n_fft=n_fft, unit="hz")
+        return freqs * SPEED_OF_LIGHT / (2.0 * self.config.chirp_slope)
 
     def compute_doppler_axis(self, n_bins: int) -> np.ndarray:
         """Convert Doppler FFT bin indices to velocity in m/s (centred on zero)."""
@@ -398,6 +418,11 @@ def process_range_doppler(cube: np.ndarray, config: RadarConfig, **kwargs) -> tu
 def cfar_2d(rd_map: np.ndarray, **kwargs) -> tuple[np.ndarray, np.ndarray]:
     """Module-level wrapper for ``RadarProcessor.cfar_2d``."""
     return RadarProcessor.cfar_2d(rd_map, **kwargs)
+
+
+def compute_beat_freq_axis(config: RadarConfig, n_bins: int, **kwargs) -> np.ndarray:
+    """Module-level wrapper for ``RadarProcessor.compute_beat_freq_axis``."""
+    return RadarProcessor(config).compute_beat_freq_axis(n_bins, **kwargs)
 
 
 def compute_range_axis(config: RadarConfig, n_bins: int, **kwargs) -> np.ndarray:

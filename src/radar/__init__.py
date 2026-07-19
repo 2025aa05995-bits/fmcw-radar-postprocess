@@ -1,9 +1,13 @@
 """FMCW radar offline post-processing library."""
 
-from .config import (
+from .devices import (
     RadarConfig,
     RadarDataCube,
     RadarDataIO,
+    RadarDevice,
+    RadarDeviceFactory,
+    SyntheticDevice,
+    DummyDevice,
     load_config,
     load_radar_cube,
     generate_synthetic_cube,
@@ -17,6 +21,7 @@ from .process import (
     process_range_doppler,
     cfar_2d,
     compute_range_axis,
+    compute_beat_freq_axis,
     compute_doppler_axis,
     compute_angle_axis,
 )
@@ -56,6 +61,10 @@ __all__ = [
     "RadarConfig",
     "RadarDataCube",
     "RadarDataIO",
+    "RadarDevice",
+    "RadarDeviceFactory",
+    "SyntheticDevice",
+    "DummyDevice",
     "load_config",
     "load_radar_cube",
     "generate_synthetic_cube",
@@ -72,6 +81,7 @@ __all__ = [
     "process_range_doppler",
     "cfar_2d",
     "compute_range_axis",
+    "compute_beat_freq_axis",
     "compute_doppler_axis",
     "compute_angle_axis",
     "run_raw_adc_qa",

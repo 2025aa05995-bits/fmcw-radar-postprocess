@@ -5,3 +5,4 @@ jupyter>=1.0
 ipykernel>=6.29
 ipympl>=0.9
 plotly>=5.18
+# GUI uses the stdlib tkinter frontend (usually bundled with Python on Windows)

@@ -1,8 +1,9 @@
-"""FMCW radar configuration and data cube I/O."""
+"""Radar configuration, cube I/O, and abstract device interface."""
 
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -69,7 +70,7 @@ class RadarConfig:
 
     Holds chirp timing, ADC dimensions, RF parameters, and optional FFT sizes.
     Derived quantities (wavelength, range resolution, max range, etc.) are
-    exposed as read-only properties.
+    exposed as read-only properties. Shared by every ``RadarDevice``.
     """
 
     center_freq_hz: float = 77e9
@@ -278,6 +279,8 @@ class RadarDataCube:
 
         Each target is ``(range_m, velocity_mps, angle_deg)``.
         """
+        from .synthetic import generate_synthetic_cube
+
         return cls(
             data=generate_synthetic_cube(config, targets=targets, snr_db=snr_db, seed=seed),
             config=config,
@@ -315,6 +318,8 @@ class RadarDataIO:
 
         Returns shape ``(samples, chirps, rx)`` as float32.
         """
+        from .synthetic import generate_synthetic_cube
+
         return generate_synthetic_cube(config, targets=targets, snr_db=snr_db, seed=seed)
 
 
@@ -354,43 +359,253 @@ def load_radar_cube(
     return _as_real_cube(cube) * scale
 
 
-def generate_synthetic_cube(
-    config: RadarConfig,
-    *,
-    targets: list[tuple[float, float, float]] | None = None,
-    snr_db: float = 25.0,
-    seed: int = 42,
-) -> np.ndarray:
+def project_sample_config_path() -> Path | None:
+    """Locate ``data/sample/radar_config.xml`` relative to the repo when present."""
+    # devices/ -> radar/ -> src/ -> project root
+    root = Path(__file__).resolve().parents[3]
+    sample = root / "data" / "sample" / "radar_config.xml"
+    return sample if sample.is_file() else None
+
+
+class RadarDevice(ABC):
     """
-    Generate a synthetic real-valued FMCW radar cube.
+    Abstract base for a radar capture device / driver.
 
-    Models beat-frequency cosines with array phase steering and additive
-    Gaussian noise. Each target is ``(range_m, velocity_mps, angle_deg)``.
+    Every device holds a ``RadarConfig`` (chirp / ADC / RF parameters). Subclass
+    ``DummyDevice`` (see ``dummy.py``) when adding real hardware — register with
+    ``RadarDeviceFactory`` and override ``open`` / ``close`` / ``read_frame``.
+
+    Example::
+
+        @RadarDeviceFactory.register("my_radar")
+        class MyRadar(RadarDevice):
+            device_type = "my_radar"
+            description = "Acme USB radar"
+
+            def open(self) -> None: ...
+            def close(self) -> None: ...
+            def read_frame(self, frame_id: int = 0) -> np.ndarray: ...
     """
-    rng = np.random.default_rng(seed)
-    ns, nc, nr = config.num_samples, config.num_chirps, config.num_rx
-    if targets is None:
-        targets = [(15.0, 3.0, 10.0), (40.0, -5.0, -20.0)]
 
-    t_fast = np.arange(ns) / config.adc_sample_rate_hz
-    t_slow = np.arange(nc) * config.chirp_period_s
-    rx_pos = np.arange(nr) * config.rx_spacing_m
-    cube = np.zeros((ns, nc, nr), dtype=np.float32)
+    #: Short identifier used by the factory (override in subclasses).
+    device_type: str = "device"
+    #: One-line description shown in device pickers / CLI help.
+    description: str = "Radar device"
 
-    for range_m, vel_mps, angle_deg in targets:
-        tau = 2.0 * range_m / 3e8
-        fd = 2.0 * vel_mps / config.wavelength_m
-        angle_rad = np.deg2rad(angle_deg)
-        for rx_idx in range(nr):
-            phase_steering = 2 * np.pi * rx_pos[rx_idx] * np.sin(angle_rad) / config.wavelength_m
-            beat_phase = (
-                2 * np.pi * config.chirp_slope * t_fast[:, None] * tau
-                + 2 * np.pi * fd * (t_slow[None, :] + tau)
-                + phase_steering
-            )
-            cube[:, :, rx_idx] += np.cos(beat_phase)
+    def __init__(
+        self,
+        config: RadarConfig,
+        *,
+        config_path: str | Path | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.config = config
+        self.config_path = Path(config_path) if config_path is not None else None
+        self._opened = False
+        self._device_options: dict[str, Any] = dict(kwargs)
+        #: High-pass filter cutoff in Hz (set via ``updateHpf``).
+        self.hpf_cutoff_hz: float = 0.0
+        #: Low-pass filter cutoff in Hz (set via ``updateLpf``).
+        self.lpf_cutoff_hz: float = 15_000_000.0
+        #: TX power setting in dB (set via ``updatePwr``).
+        self.tx_power_db: float = 0.0
+        #: RX gain setting in dB (set via ``updateGain``).
+        self.rx_gain_db: float = 26.0
+        #: Chirp sweep bandwidth in Hz (set via ``updateChirpBw``).
+        self.chirp_bandwidth_hz: float = float(config.bandwidth_hz)
+        #: Optional callback when RF controls change (e.g. live-worker nudge).
+        self._controls_changed_cb: Any = None
 
-    signal_power = np.mean(cube**2)
-    noise_power = signal_power / (10 ** (snr_db / 10))
-    noise = rng.normal(0, np.sqrt(noise_power), cube.shape).astype(np.float32)
-    return cube + noise
+    @classmethod
+    def default_config_path(cls) -> Path | None:
+        """
+        Optional default XML / config file for this device type.
+
+        Override for hardware that ships with a known profile path.
+        """
+        return None
+
+    @classmethod
+    def load_device_config(
+        cls,
+        *,
+        config: RadarConfig | None = None,
+        config_path: str | Path | None = None,
+        **kwargs: Any,
+    ) -> RadarConfig:
+        """
+        Resolve ``RadarConfig`` for this device.
+
+        Priority: explicit ``config`` → ``config_path`` → ``default_config_path()``
+        → built-in ``RadarConfig()``. Real drivers can override to merge SDK /
+        EEPROM parameters into the config object.
+        """
+        if config is not None:
+            return config
+        path = config_path if config_path is not None else cls.default_config_path()
+        if path is not None:
+            return load_config(path)
+        return RadarConfig()
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        config: RadarConfig | None = None,
+        config_path: str | Path | None = None,
+        **kwargs: Any,
+    ) -> RadarDevice:
+        """
+        Build a configured device instance (config + driver options).
+
+        Prefer ``RadarDeviceFactory.create(...)`` from application code so the
+        device type is selected by name.
+        """
+        resolved_path = config_path
+        if resolved_path is None and config is None:
+            resolved_path = cls.default_config_path()
+        cfg = cls.load_device_config(
+            config=config, config_path=resolved_path, **kwargs
+        )
+        return cls(cfg, config_path=resolved_path, **kwargs)
+
+    @property
+    def name(self) -> str:
+        """Human-readable name shown in the GUI status bar."""
+        return self.device_type
+
+    @property
+    def is_open(self) -> bool:
+        """True after a successful ``open()`` until ``close()``."""
+        return self._opened
+
+    @abstractmethod
+    def open(self) -> None:
+        """
+        Open / connect the device and prepare for streaming.
+
+        Must set ``self._opened = True`` on success.
+        """
+
+    @abstractmethod
+    def close(self) -> None:
+        """
+        Stop streaming and release device resources.
+
+        Must set ``self._opened = False``. Safe to call if already closed.
+        """
+
+    @abstractmethod
+    def read_frame(self, frame_id: int = 0) -> np.ndarray:
+        """
+        Capture one radar cube.
+
+        Returns
+        -------
+        np.ndarray
+            Real ADC cube with shape ``(num_samples, num_chirps, num_rx)``.
+        """
+
+    def supports_temperature(self) -> bool:
+        """Return True if this device can report real-time temperature."""
+        return False
+
+    def read_temperature(self) -> float | None:
+        """
+        Read device temperature in degrees Celsius.
+
+        Override in drivers that expose a thermal sensor. Default returns
+        ``None`` (no temperature available).
+        """
+        return None
+
+    def updateHpf(self, cutoff_hz: float) -> None:
+        """
+        Update the device high-pass filter cutoff frequency.
+
+        Parameters
+        ----------
+        cutoff_hz :
+            Cutoff in Hz (GUI typically steps 200–3600 kHz). Real drivers
+            should program the hardware; the default stores the value on
+            ``self.hpf_cutoff_hz``.
+        """
+        self.hpf_cutoff_hz = float(cutoff_hz)
+        self._notify_controls_changed()
+
+    def updateLpf(self, cutoff_hz: float) -> None:
+        """
+        Update the device low-pass filter cutoff frequency.
+
+        Parameters
+        ----------
+        cutoff_hz :
+            Cutoff in Hz (GUI typically steps 15–25 MHz). Real drivers
+            should program the hardware; the default stores the value on
+            ``self.lpf_cutoff_hz``.
+        """
+        self.lpf_cutoff_hz = float(cutoff_hz)
+        self._notify_controls_changed()
+
+    def updatePwr(self, power_db: float) -> None:
+        """
+        Update TX transmit power.
+
+        Parameters
+        ----------
+        power_db :
+            TX power in dB (GUI: 0–15, 1 dB steps). Real drivers should
+            program the PA; default stores ``self.tx_power_db``.
+        """
+        self.tx_power_db = float(power_db)
+        self._notify_controls_changed()
+
+    def updateGain(self, gain_db: float) -> None:
+        """
+        Update RX gain.
+
+        Parameters
+        ----------
+        gain_db :
+            RX gain in dB (GUI: 26–48, 3 dB steps). Real drivers should
+            program the LNA/VGA; default stores ``self.rx_gain_db``.
+        """
+        self.rx_gain_db = float(gain_db)
+        self._notify_controls_changed()
+
+    def updateChirpBw(self, bandwidth_hz: float) -> None:
+        """
+        Update chirp sweep bandwidth (sets range resolution).
+
+        Parameters
+        ----------
+        bandwidth_hz :
+            Chirp RF bandwidth in Hz. Updates ``self.chirp_bandwidth_hz`` and
+            ``self.config.bandwidth_hz`` (and clears an explicit chirp slope so
+            slope tracks bandwidth / ramp time). Real drivers should program
+            the chirp synthesizer.
+        """
+        bw = float(bandwidth_hz)
+        if bw <= 0.0:
+            raise ValueError("chirp bandwidth must be positive")
+        self.chirp_bandwidth_hz = bw
+        self.config.bandwidth_hz = bw
+        # Keep slope consistent with BW / ramp unless vendor sets it explicitly later.
+        self.config.chirp_slope_hz_per_s = None
+        self._notify_controls_changed()
+
+    def set_controls_changed_callback(self, callback: Any) -> None:
+        """Register a callback invoked after any RF control update."""
+        self._controls_changed_cb = callback
+
+    def _notify_controls_changed(self) -> None:
+        cb = self._controls_changed_cb
+        if callable(cb):
+            cb()
+
+    def __enter__(self) -> RadarDevice:
+        self.open()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import RadarConfig
+from .devices import RadarConfig
 
 _INT16_FS = 32767.0
 

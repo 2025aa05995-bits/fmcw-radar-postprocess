@@ -10,7 +10,7 @@ try:
 except ImportError:  # pragma: no cover
     go = None
 
-from .config import RadarConfig
+from .devices import RadarConfig
 from .process import RadarProcessor
 from .testing import QAReport
 
