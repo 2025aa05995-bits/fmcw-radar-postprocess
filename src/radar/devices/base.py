@@ -413,6 +413,12 @@ class RadarDevice(ABC):
         self.rx_gain_db: float = 26.0
         #: Chirp sweep bandwidth in Hz (set via ``updateChirpBw``).
         self.chirp_bandwidth_hz: float = float(config.bandwidth_hz)
+        #: ADC samples per chirp (set via ``updateSamples``).
+        self.num_samples: int = int(config.num_samples)
+        #: ADC sample rate in Hz (set via ``updateSampleRate``).
+        self.adc_sample_rate_hz: float = float(config.adc_sample_rate_hz)
+        #: Chirps per frame (set via ``updateVelocityResolution``).
+        self.num_chirps: int = int(config.num_chirps)
         #: Optional callback when RF controls change (e.g. live-worker nudge).
         self._controls_changed_cb: Any = None
 
@@ -540,7 +546,7 @@ class RadarDevice(ABC):
         Parameters
         ----------
         cutoff_hz :
-            Cutoff in Hz (GUI typically steps 15–25 MHz). Real drivers
+            Cutoff in Hz (GUI typically steps 15–40 MHz). Real drivers
             should program the hardware; the default stores the value on
             ``self.lpf_cutoff_hz``.
         """
@@ -592,6 +598,93 @@ class RadarDevice(ABC):
         self.config.bandwidth_hz = bw
         # Keep slope consistent with BW / ramp unless vendor sets it explicitly later.
         self.config.chirp_slope_hz_per_s = None
+        self._notify_controls_changed()
+
+    def updateSamples(self, num_samples: int) -> None:
+        """
+        Update the number of ADC samples per chirp.
+
+        Parameters
+        ----------
+        num_samples :
+            Fast-time sample count (GUI: 128 / 512 / 1024 / 2048 / 4096).
+            Updates ``self.num_samples`` and ``self.config.num_samples``.
+            Real drivers should reprogram the ADC / chirp profile.
+        """
+        n = int(num_samples)
+        if n <= 0:
+            raise ValueError("num_samples must be positive")
+        self.num_samples = n
+        self.config.num_samples = n
+        self._notify_controls_changed()
+
+    def updateSampleRate(self, sample_rate_hz: float) -> None:
+        """
+        Update the ADC sampling rate.
+
+        Parameters
+        ----------
+        sample_rate_hz :
+            Sample rate in Hz (GUI: 20e6 / 40e6 / 80e6 for 20 / 40 / 80 MSPS).
+            Updates ``self.adc_sample_rate_hz`` and ``self.config.adc_sample_rate_hz``.
+            Real drivers should reprogram the ADC clock / profile.
+        """
+        fs = float(sample_rate_hz)
+        if fs <= 0.0:
+            raise ValueError("sample rate must be positive")
+        self.adc_sample_rate_hz = fs
+        self.config.adc_sample_rate_hz = fs
+        self._notify_controls_changed()
+
+    def updateMaxVelocity(self, v_max_mps: float) -> None:
+        """
+        Update maximum unambiguous velocity by programming the chirp period.
+
+        Maps ``v_max = λ / (4 · T_c)`` → ``T_c = λ / (4 · v_max)``. Prefers
+        adjusting ``idle_time_s``; shortens ``chirp_duration_s`` only when
+        ``T_c`` would otherwise fall below the ramp time.
+
+        Parameters
+        ----------
+        v_max_mps :
+            Desired max unambiguous velocity in m/s (one-sided).
+        """
+        v = float(v_max_mps)
+        if v <= 0.0:
+            raise ValueError("max velocity must be positive")
+        t_c = self.config.wavelength_m / (4.0 * v)
+        ramp = float(self.config.chirp_duration_s)
+        if t_c < ramp:
+            self.config.chirp_duration_s = t_c
+            self.config.idle_time_s = 0.0
+            # Slope was derived from BW / ramp — clear explicit override.
+            self.config.chirp_slope_hz_per_s = None
+        else:
+            self.config.idle_time_s = t_c - ramp
+        self._notify_controls_changed()
+
+    def updateVelocityResolution(self, dv_mps: float) -> None:
+        """
+        Update velocity resolution by programming chirps-per-frame.
+
+        Maps ``Δv = λ / (2 · N · T_c)`` → ``N = round(λ / (2 · Δv · T_c))``,
+        clamped to ``64…1024`` chirps.
+
+        Parameters
+        ----------
+        dv_mps :
+            Desired velocity resolution in m/s.
+        """
+        dv = float(dv_mps)
+        if dv <= 0.0:
+            raise ValueError("velocity resolution must be positive")
+        t_c = float(self.config.chirp_period_s)
+        if t_c <= 0.0:
+            raise ValueError("chirp period must be positive")
+        n = int(round(self.config.wavelength_m / (2.0 * dv * t_c)))
+        n = max(64, min(n, 1024))
+        self.num_chirps = n
+        self.config.num_chirps = n
         self._notify_controls_changed()
 
     def set_controls_changed_callback(self, callback: Any) -> None:

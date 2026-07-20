@@ -21,7 +21,7 @@ _HPF_KHZ_STEP = 200
 
 # LPF slider span (MHz) — compact control on the right under the plot.
 _LPF_MHZ_MIN = 15
-_LPF_MHZ_MAX = 25
+_LPF_MHZ_MAX = 40
 _LPF_MHZ_STEP = 1
 
 # TX power / RX gain (dB) — vertical side sliders.

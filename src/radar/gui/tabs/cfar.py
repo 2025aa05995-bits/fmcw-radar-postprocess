@@ -83,7 +83,6 @@ class CfarTab(MeasurementTab):
             row2,
             text="Show threshold map",
             variable=self.show_threshold,
-            command=self._invalidate_plot,
         ).pack(side="left")
         ttk.Button(row2, text="Reset defaults", command=self._reset_defaults).pack(
             side="left", padx=8
@@ -104,11 +103,24 @@ class CfarTab(MeasurementTab):
         pfa_state = "disabled" if self.use_fixed_thresh.get() else "normal"
         self.pfa_var.configure(state=pfa_state)
 
-    def _invalidate_plot(self) -> None:
-        """Force a full redraw on next update (e.g. after display-mode change)."""
+    def _teardown_heatmap(self) -> None:
+        """Remove image + colorbar cleanly (avoids stacked colorbar axes)."""
+        if self._cbar is not None:
+            try:
+                self._cbar.remove()
+            except Exception:  # noqa: BLE001
+                pass
+            self._cbar = None
         self._image = None
         self._scatter = None
-        self._cbar = None
+        ax = self.plot.axes
+        ax.clear()
+        for extra in list(self.plot.fig.axes):
+            if extra is not ax:
+                try:
+                    self.plot.fig.delaxes(extra)
+                except Exception:  # noqa: BLE001
+                    pass
         self._showing_threshold = False
 
     def _reset_defaults(self) -> None:
@@ -126,7 +138,6 @@ class CfarTab(MeasurementTab):
         self.use_fixed_thresh.set(False)
         self.show_threshold.set(False)
         self._on_thresh_mode_toggle()
-        self._invalidate_plot()
 
     def _read_int(self, widget: ttk.Spinbox, default: int, *, minimum: int = 0) -> int:
         try:
@@ -188,9 +199,11 @@ class CfarTab(MeasurementTab):
             # Non-evaluated border cells are +inf — hide them.
             display = np.where(np.isfinite(threshold), display, np.nan)
             cbar_label = "Threshold (dB)"
+            cmap_name = "magma"
         else:
             display = 20 * np.log10(rd_map + 1e-12)
             cbar_label = "Magnitude (dB)"
+            cmap_name = "viridis"
 
         r_axis = frame.range_axis()
         d_axis = frame.doppler_axis()
@@ -204,17 +217,13 @@ class CfarTab(MeasurementTab):
             clim = (0.0, 1.0)
 
         ax = self.plot.axes
-        need_rebuild = (
-            self._image is None
-            or self._showing_threshold != show_thr
-        )
-        if need_rebuild:
-            ax.clear()
+        if self._image is None:
+            self._teardown_heatmap()
             self._image = ax.imshow(
                 display,
                 aspect="auto",
                 extent=extent,
-                cmap="magma" if show_thr else "viridis",
+                cmap=cmap_name,
             )
             self._cbar = self.plot.fig.colorbar(self._image, ax=ax, label=cbar_label)
             self._scatter = ax.scatter(
@@ -230,12 +239,18 @@ class CfarTab(MeasurementTab):
             ax.legend(loc="upper right")
             self._showing_threshold = show_thr
         else:
+            # In-place update — survives shape changes and threshold-map toggles
+            # without stacking colorbar axes.
             self._image.set_data(display)
             self._image.set_extent(extent)
             self._image.set_clim(*clim)
-            self._scatter.set_offsets(np.column_stack([d_axis[di], r_axis[ri]]))
+            if self._showing_threshold != show_thr:
+                self._image.set_cmap(cmap_name)
+                self._showing_threshold = show_thr
             if self._cbar is not None:
                 self._cbar.set_label(cbar_label)
+            if self._scatter is not None:
+                self._scatter.set_offsets(np.column_stack([d_axis[di], r_axis[ri]]))
 
         summary = self._settings_summary(kwargs, int(ri.size))
         self._settings_lbl.configure(text=summary)

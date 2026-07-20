@@ -161,6 +161,42 @@ class DummyDevice(RadarDevice):
         super().updateChirpBw(bandwidth_hz)
         # VendorSDK.set_chirp_bandwidth(self._handle, bandwidth_hz)
 
+    def updateSamples(self, num_samples: int) -> None:
+        """
+        Program ADC samples-per-chirp on the device.
+
+        TODO: ``VendorSDK.set_num_samples(self._handle, num_samples)``.
+        """
+        super().updateSamples(num_samples)
+        # VendorSDK.set_num_samples(self._handle, num_samples)
+
+    def updateSampleRate(self, sample_rate_hz: float) -> None:
+        """
+        Program ADC sample rate on the device.
+
+        TODO: ``VendorSDK.set_sample_rate(self._handle, sample_rate_hz)``.
+        """
+        super().updateSampleRate(sample_rate_hz)
+        # VendorSDK.set_sample_rate(self._handle, sample_rate_hz)
+
+    def updateMaxVelocity(self, v_max_mps: float) -> None:
+        """
+        Program chirp period / idle time for the requested max velocity.
+
+        TODO: ``VendorSDK.set_chirp_period(self._handle, t_c)`` or idle time.
+        """
+        super().updateMaxVelocity(v_max_mps)
+        # VendorSDK.set_idle_time(self._handle, self.config.idle_time_s)
+
+    def updateVelocityResolution(self, dv_mps: float) -> None:
+        """
+        Program chirps-per-frame for the requested velocity resolution.
+
+        TODO: ``VendorSDK.set_num_chirps(self._handle, self.config.num_chirps)``.
+        """
+        super().updateVelocityResolution(dv_mps)
+        # VendorSDK.set_num_chirps(self._handle, self.config.num_chirps)
+
     def read_frame(self, frame_id: int = 0) -> np.ndarray:
         """
         Capture one ADC cube shaped ``(num_samples, num_chirps, num_rx)``.
