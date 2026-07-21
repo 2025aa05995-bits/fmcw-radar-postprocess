@@ -13,6 +13,7 @@ from ..frame import RadarFrame
 
 if TYPE_CHECKING:
     from ...devices import RadarDevice
+    from ..settings import DeviceSettingsController
 
 TabCls = TypeVar("TabCls", bound=type)
 
@@ -54,16 +55,24 @@ class MeasurementTab(ABC):
     Subclass, set ``title`` / ``order``, implement ``build`` + ``update``,
     and decorate with ``@register_tab``. The main app discovers tabs
     automatically — no edits to ``app.py`` required.
+
+    Set ``needs_background_ingest = True`` only when the tab must collect
+    data while hidden (e.g. temperature history). Display work stays in
+    ``update`` and runs only for the active tab.
     """
 
     title: str = "Untitled"
     order: int = 100
+    #: When False (default), the app skips ``ingest_frame`` while hidden.
+    needs_background_ingest: bool = False
 
     def __init__(self) -> None:
         self.root: tk.Misc | None = None
         self.frame: ttk.Frame | None = None
         self._visible = False
         self._device_getter: Callable[[], RadarDevice | None] | None = None
+        self._settings: DeviceSettingsController | None = None
+        self._suppress_setting_events = False
 
     def bind_device(self, getter: Callable[[], RadarDevice | None]) -> None:
         """
@@ -73,6 +82,15 @@ class MeasurementTab(ABC):
         device) so tabs can call driver methods such as ``updateHpf``.
         """
         self._device_getter = getter
+
+    def bind_settings(self, settings: DeviceSettingsController) -> None:
+        """Attach the shared non-blocking settings controller."""
+        self._settings = settings
+
+    @property
+    def settings(self) -> DeviceSettingsController | None:
+        """Shared device-settings controller, or ``None`` if not bound."""
+        return self._settings
 
     @property
     def device(self) -> RadarDevice | None:
@@ -103,7 +121,8 @@ class MeasurementTab(ABC):
         Optional background ingest while another tab is active.
 
         Override to keep collecting data (e.g. temperature history) without
-        redrawing. Called every live frame for all tabs.
+        redrawing. Only called when ``needs_background_ingest`` is True
+        (or the tab is visible).
         """
         return
 
@@ -119,7 +138,8 @@ class MeasurementTab(ABC):
         """
         Called after the live device is swapped in the main app.
 
-        Override to re-push tab settings (e.g. HPF) to the new driver.
+        Override to re-sync tab controls from the new driver (seed settings;
+        do not block the UI with device ``update*`` calls).
         """
         return
 

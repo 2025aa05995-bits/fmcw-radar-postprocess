@@ -126,6 +126,20 @@ class SyntheticDevice(RadarDevice):
         self.base_targets = targets  # None → moving default scene
         self._rng = np.random.default_rng(seed)
         self._temp_c = 42.0  # simulated die temperature (°C)
+        # Optional HW-like programming delays so the GUI busy/revert path is
+        # exercised without real silicon (TX power ≥ 1 s by default).
+        if kwargs.get("simulate_rf_latency", True):
+            self.rf_program_latency_s = {
+                "pwr": float(kwargs.get("pwr_latency_s", 1.0)),
+                "gain": float(kwargs.get("gain_latency_s", 0.2)),
+                "hpf": float(kwargs.get("hpf_latency_s", 0.1)),
+                "lpf": float(kwargs.get("lpf_latency_s", 0.1)),
+                "chirp_bw": float(kwargs.get("chirp_bw_latency_s", 0.15)),
+                "samples": float(kwargs.get("samples_latency_s", 0.15)),
+                "sample_rate": float(kwargs.get("sample_rate_latency_s", 0.15)),
+                "vmax": float(kwargs.get("vmax_latency_s", 0.15)),
+                "dv": float(kwargs.get("dv_latency_s", 0.1)),
+            }
 
     @classmethod
     def default_config_path(cls) -> Path | None:

@@ -115,9 +115,6 @@ class RangeDopplerTab(MeasurementTab):
         self._cbar = None
         self._hold_map: np.ndarray | None = None
         self._last_rx: list[int] = []
-        self._last_vmax_mps: float | None = None
-        self._last_dv_mps: float | None = None
-        self._syncing_velocity = False
         parent.after_idle(self._sync_velocity_from_device)
 
     def reset_max_hold(self) -> None:
@@ -148,6 +145,22 @@ class RangeDopplerTab(MeasurementTab):
         except (TypeError, ValueError, tk.TclError):
             return _DV_MPS_MIN
 
+    def _set_vmax_ui(self, vmax: float) -> None:
+        self._suppress_setting_events = True
+        try:
+            self.vmax_var.set(float(vmax))
+            self._vmax_value_lbl.configure(text=f"Max velocity {vmax:.1f} m/s")
+        finally:
+            self._suppress_setting_events = False
+
+    def _set_dv_ui(self, dv: float) -> None:
+        self._suppress_setting_events = True
+        try:
+            self.dv_var.set(float(dv))
+            self._dv_value_lbl.configure(text=f"Δv {dv:.2f} m/s")
+        finally:
+            self._suppress_setting_events = False
+
     def _sync_velocity_from_device(self) -> None:
         """Initialize velocity sliders from the live device config."""
         device = self.device
@@ -156,65 +169,95 @@ class RangeDopplerTab(MeasurementTab):
         cfg = device.config
         vmax = self._snap_vmax(float(cfg.max_velocity_mps))
         dv = self._snap_dv(float(cfg.doppler_resolution_mps))
-        self._syncing_velocity = True
-        try:
-            self.vmax_var.set(vmax)
-            self.dv_var.set(dv)
-        finally:
-            self._syncing_velocity = False
-        self._last_vmax_mps = None
-        self._last_dv_mps = None
-        self._on_vmax_changed()
-        self._on_dv_changed()
+        self._set_vmax_ui(vmax)
+        self._set_dv_ui(dv)
+        self._vmax_status.configure(text="")
+        self._dv_status.configure(text="")
+        ctrl = self.settings
+        if ctrl is not None:
+            ctrl.seed("vmax_mps", vmax, label="Max velocity", unit="m/s")
+            ctrl.seed("dv_mps", dv, label="Δv", unit="m/s")
 
     def _on_vmax_changed(self, _value=None) -> None:
-        """Push max velocity → ``device.updateMaxVelocity`` (chirp period)."""
-        if self._syncing_velocity:
+        """Queue max velocity → device (also refreshes Δv chirp count)."""
+        if self._suppress_setting_events:
             return
         vmax = self._vmax_mps()
+        dv = self._dv_mps()
         self._vmax_value_lbl.configure(text=f"Max velocity {vmax:.1f} m/s")
-        if self._last_vmax_mps is not None and abs(self._last_vmax_mps - vmax) < 1e-9:
+
+        ctrl = self.settings
+        if ctrl is None:
+            self._vmax_status.configure(text="(no settings)")
             return
-        self._last_vmax_mps = vmax
-        device = self.device
-        if device is None:
-            self._vmax_status.configure(text="(no device)")
-            return
-        try:
+
+        def _apply(device) -> None:
             device.updateMaxVelocity(vmax)
-            # Keep Δv target: re-apply resolution after T_c changes.
-            device.updateVelocityResolution(self._dv_mps())
-            self._last_dv_mps = self._dv_mps()
-        except Exception as exc:  # noqa: BLE001
-            self._vmax_status.configure(text=f"error: {exc}")
-            return
-        n = int(device.config.num_chirps)
-        t_c_us = device.config.chirp_period_s * 1e6
-        self._vmax_status.configure(text=f"T_c={t_c_us:.1f} µs, N={n}")
-        self._dv_status.configure(text=f"N={n} chirps")
-        self.reset_max_hold()
+            device.updateVelocityResolution(dv)
+
+        def _revert(committed) -> None:
+            self._set_vmax_ui(float(committed))
+            self._vmax_status.configure(text="busy — restored")
+
+        def _applied(_v) -> None:
+            device = self.device
+            if device is not None:
+                n = int(device.config.num_chirps)
+                t_c_us = device.config.chirp_period_s * 1e6
+                self._vmax_status.configure(text=f"T_c={t_c_us:.1f} µs, N={n}")
+                self._dv_status.configure(text=f"N={n} chirps")
+                # Δv was re-applied with vmax; keep tracker in sync.
+                ctrl.seed("dv_mps", dv, label="Δv", unit="m/s")
+            self.reset_max_hold()
+
+        started = ctrl.request(
+            "vmax_mps",
+            vmax,
+            label="Max velocity",
+            unit="m/s",
+            apply=_apply,
+            on_applied=_applied,
+            on_discarded=_revert,
+            on_error=lambda e: self._vmax_status.configure(text=f"error: {e}"),
+        )
+        if started:
+            self._vmax_status.configure(text="applying…")
 
     def _on_dv_changed(self, _value=None) -> None:
-        """Push velocity resolution → ``device.updateVelocityResolution``."""
-        if self._syncing_velocity:
+        """Queue velocity resolution → device (non-blocking)."""
+        if self._suppress_setting_events:
             return
         dv = self._dv_mps()
         self._dv_value_lbl.configure(text=f"Δv {dv:.2f} m/s")
-        if self._last_dv_mps is not None and abs(self._last_dv_mps - dv) < 1e-9:
+
+        ctrl = self.settings
+        if ctrl is None:
+            self._dv_status.configure(text="(no settings)")
             return
-        self._last_dv_mps = dv
-        device = self.device
-        if device is None:
-            self._dv_status.configure(text="(no device)")
-            return
-        try:
-            device.updateVelocityResolution(dv)
-        except Exception as exc:  # noqa: BLE001
-            self._dv_status.configure(text=f"error: {exc}")
-            return
-        n = int(device.config.num_chirps)
-        self._dv_status.configure(text=f"N={n} chirps → device")
-        self.reset_max_hold()
+
+        def _revert(committed) -> None:
+            self._set_dv_ui(float(committed))
+            self._dv_status.configure(text="busy — restored")
+
+        def _applied(_v) -> None:
+            device = self.device
+            if device is not None:
+                n = int(device.config.num_chirps)
+                self._dv_status.configure(text=f"N={n} chirps → device")
+            self.reset_max_hold()
+
+        started = ctrl.request(
+            "dv_mps",
+            dv,
+            label="Δv",
+            unit="m/s",
+            apply=lambda d, v=dv: d.updateVelocityResolution(v),
+            on_applied=_applied,
+            on_discarded=_revert,
+            on_error=lambda e: self._dv_status.configure(text=f"error: {e}"),
+        )
+        if started:
+            self._dv_status.configure(text="applying…")
 
     def _teardown_heatmap(self) -> None:
         """Remove image + colorbar cleanly (avoids stacked colorbar axes)."""
@@ -237,8 +280,6 @@ class RangeDopplerTab(MeasurementTab):
 
     def on_device_changed(self) -> None:
         """Re-sync velocity controls from the newly selected device."""
-        self._last_vmax_mps = None
-        self._last_dv_mps = None
         self._sync_velocity_from_device()
 
     def update(self, frame: RadarFrame) -> None:

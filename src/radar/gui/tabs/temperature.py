@@ -24,6 +24,7 @@ class TemperatureTab(MeasurementTab):
 
     title = "Temperature"
     order = 55
+    needs_background_ingest = True
 
     def build(self, parent: ttk.Frame) -> None:
         opts = ttk.Frame(parent)

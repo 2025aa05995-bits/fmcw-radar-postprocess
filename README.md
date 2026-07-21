@@ -42,6 +42,12 @@ python -m radar.gui --device synthetic --interval-ms 100
 
 Built-in tabs: **Raw ADC**, **Range FFT** (chirp / avg / max-hold), **Range-Doppler**, **CFAR**, **Angle**, **QA** (power, correlation, group delay).
 
+Radar parameter changes (TX power, filters, sample rate, …) are applied on a
+**background thread**. The bottom **Status** section shows activity, tracked
+settings, and stream state. While the device is busy (TX power programming is
+typically ≥ 1 s), further setting edits are **discarded** and controls snap
+back to the last applied value so the GUI stays responsive.
+
 ### Adding a device driver
 
 Copy ``src/radar/devices/dummy.py`` (the template) rather than

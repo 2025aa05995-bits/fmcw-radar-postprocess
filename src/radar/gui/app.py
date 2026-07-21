@@ -9,6 +9,7 @@ from tkinter import messagebox, ttk
 from ..devices import RadarDeviceFactory
 from ..testing import QAThresholds
 from .live import LiveDataWorker
+from .settings import DeviceSettingsController
 from .tabs import registered_tabs
 from .theme import COLORS, apply_dark_theme
 
@@ -19,6 +20,10 @@ class RadarLiveApp:
 
     Tabs are discovered via ``@register_tab``. Live data comes from a
     ``RadarDevice`` created by ``RadarDeviceFactory`` (default: ``synthetic``).
+
+    Device parameter changes run off the UI thread via
+    ``DeviceSettingsController``. While an apply is busy, further setting
+    edits are discarded and controls snap back to the last committed value.
     """
 
     def __init__(
@@ -30,7 +35,7 @@ class RadarLiveApp:
     ) -> None:
         self.root = tk.Tk()
         self.root.title("FMCW Radar — Live Measurements")
-        self.root.minsize(960, 600)
+        self.root.minsize(960, 640)
         apply_dark_theme(self.root)
         # Start maximized (full desktop work area).
         try:
@@ -51,11 +56,19 @@ class RadarLiveApp:
             qa_thresholds=QAThresholds(),
         )
 
+        self.settings = DeviceSettingsController(
+            self.root,
+            device_getter=lambda: self.worker.device,
+            on_status=self._on_settings_status,
+        )
+
         self._tabs: list = []
         self._active_tab = None
         self._running = False
         self._fps_count = 0
         self._fps_stamp = 0.0
+        self._last_frame_status = "Idle"
+        self._settings_status_msg = "Idle"
 
         self._build_chrome()
         self._build_tabs()
@@ -115,10 +128,34 @@ class RadarLiveApp:
             side="left", padx=2
         )
 
-        status_bar = ttk.Frame(self.root, style="Header.TFrame", padding=(14, 6))
-        status_bar.pack(side="bottom", fill="x")
-        self.status = ttk.Label(status_bar, text="Idle", style="Status.TLabel", anchor="w")
-        self.status.pack(side="left", fill="x", expand=True)
+        # Status section — what the GUI / device is doing (not a full dashboard).
+        status_section = ttk.Frame(self.root, style="Header.TFrame", padding=(14, 8))
+        status_section.pack(side="bottom", fill="x")
+
+        ttk.Label(status_section, text="Status", style="HeaderMuted.TLabel").pack(
+            anchor="w"
+        )
+        self.status_activity = ttk.Label(
+            status_section,
+            text="Activity: Idle",
+            style="Status.TLabel",
+            anchor="w",
+        )
+        self.status_activity.pack(side="top", fill="x")
+        self.status_settings = ttk.Label(
+            status_section,
+            text="Settings: (none)",
+            style="Status.TLabel",
+            anchor="w",
+        )
+        self.status_settings.pack(side="top", fill="x", pady=(2, 0))
+        self.status = ttk.Label(
+            status_section,
+            text="Stream: Idle",
+            style="Status.TLabel",
+            anchor="w",
+        )
+        self.status.pack(side="top", fill="x", pady=(2, 0))
 
         rule = tk.Frame(self.root, height=1, bg=COLORS["border"], bd=0, highlightthickness=0)
         rule.pack(side="top", fill="x")
@@ -134,11 +171,26 @@ class RadarLiveApp:
         for cls in registered_tabs():
             tab = cls()
             tab.bind_device(lambda: self.worker.device)
+            tab.bind_settings(self.settings)
             tab.attach(self.notebook)
             self._tabs.append(tab)
         if self._tabs:
             self._tabs[0].on_show()
             self._active_tab = self._tabs[0]
+        # Tabs seed settings on after_idle — refresh once that has run.
+        self.root.after_idle(self._refresh_settings_status)
+
+    def _on_settings_status(self, message: str) -> None:
+        self._settings_status_msg = message
+        self._refresh_settings_status()
+
+    def _refresh_settings_status(self) -> None:
+        busy = self.settings.busy
+        activity = self._settings_status_msg or ("Busy…" if busy else "Idle")
+        prefix = "Activity: "
+        self.status_activity.configure(text=f"{prefix}{activity}")
+        snap = self.settings.format_snapshot()
+        self.status_settings.configure(text=f"Settings: {snap}")
 
     def _on_tab_changed(self, _event=None) -> None:
         try:
@@ -158,10 +210,14 @@ class RadarLiveApp:
             messagebox.showerror("Invalid interval", "Enter interval in milliseconds.")
             return
         self.worker.set_interval(ms / 1000.0)
-        self.status.configure(text=f"Interval set to {ms:.0f} ms")
+        self._last_frame_status = f"Interval set to {ms:.0f} ms"
+        self.status.configure(text=f"Stream: {self._last_frame_status}")
 
     def _on_device_selected(self, _event=None) -> None:
-        self.status.configure(text=f"Device selected: {self.device_var.get()} (Apply to switch)")
+        self._last_frame_status = (
+            f"Device selected: {self.device_var.get()} (Apply to switch)"
+        )
+        self.status.configure(text=f"Stream: {self._last_frame_status}")
 
     def _apply_device(self) -> None:
         name = self.device_var.get().strip().lower()
@@ -178,6 +234,7 @@ class RadarLiveApp:
         if was_running:
             self.stop()
         self.device_type = name
+        self.settings.clear()
         self.worker.set_device(device)
         for tab in self._tabs:
             try:
@@ -189,7 +246,9 @@ class RadarLiveApp:
             if device.config_path is not None
             else ""
         )
-        self.status.configure(text=f"Device: {device.name}{cfg_note}")
+        self._last_frame_status = f"Device: {device.name}{cfg_note}"
+        self.status.configure(text=f"Stream: {self._last_frame_status}")
+        self._refresh_settings_status()
         if was_running:
             self.start()
 
@@ -205,7 +264,8 @@ class RadarLiveApp:
         self._running = True
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
-        self.status.configure(text=f"Running ({self.worker.device.name})…")
+        self._last_frame_status = f"Running ({self.worker.device.name})…"
+        self.status.configure(text=f"Stream: {self._last_frame_status}")
         self._poll()
 
     def stop(self) -> None:
@@ -213,43 +273,54 @@ class RadarLiveApp:
         self.worker.stop()
         self.btn_start.configure(state="normal")
         self.btn_stop.configure(state="disabled")
-        self.status.configure(text="Stopped")
+        self._last_frame_status = "Stopped"
+        self.status.configure(text=f"Stream: {self._last_frame_status}")
 
     def _poll(self) -> None:
         if not self._running:
             return
         frame = self.worker.get_latest()
         if frame is not None:
+            # Only tabs that need background history (or the active tab) ingest.
             for tab in self._tabs:
-                try:
-                    tab.ingest_frame(frame)
-                except Exception:  # noqa: BLE001
-                    pass
+                if tab is self._active_tab or getattr(
+                    tab, "needs_background_ingest", False
+                ):
+                    try:
+                        tab.ingest_frame(frame)
+                    except Exception:  # noqa: BLE001
+                        pass
 
+            # Display work: active tab only.
             if self._active_tab is not None:
                 try:
                     self._active_tab.update(frame)
                 except Exception as exc:  # noqa: BLE001
-                    self.status.configure(text=f"Tab error: {exc}")
+                    self._last_frame_status = f"Tab error: {exc}"
+                    self.status.configure(text=f"Stream: {self._last_frame_status}")
                 else:
                     self._fps_count += 1
                     err = self.worker.last_error
                     if err:
-                        self.status.configure(text=f"Device error: {err}")
+                        self._last_frame_status = f"Device error: {err}"
                     else:
                         temp = (
                             f"  ·  T={frame.temperature_c:.1f}°C"
                             if frame.temperature_c is not None
                             else ""
                         )
-                        self.status.configure(
-                            text=(
-                                f"{frame.source_name}  ·  frame {frame.frame_id}  ·  "
-                                f"cube {frame.cube.shape}{temp}"
-                            )
+                        self._last_frame_status = (
+                            f"{frame.source_name}  ·  frame {frame.frame_id}  ·  "
+                            f"cube {frame.cube.shape}{temp}"
                         )
+                    self.status.configure(text=f"Stream: {self._last_frame_status}")
         elif self.worker.last_error:
-            self.status.configure(text=f"Device error: {self.worker.last_error}")
+            self._last_frame_status = f"Device error: {self.worker.last_error}"
+            self.status.configure(text=f"Stream: {self._last_frame_status}")
+
+        # Keep settings line fresh without doing extra device work.
+        if self.settings.busy:
+            self._refresh_settings_status()
 
         self.root.after(16, self._poll)
 

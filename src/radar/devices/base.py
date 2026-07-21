@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import xml.etree.ElementTree as ET
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -421,6 +422,11 @@ class RadarDevice(ABC):
         self.num_chirps: int = int(config.num_chirps)
         #: Optional callback when RF controls change (e.g. live-worker nudge).
         self._controls_changed_cb: Any = None
+        #: Optional simulated / measured RF programming latency (seconds) keyed
+        #: by control name (``pwr``, ``gain``, ``hpf``, …). Real drivers may
+        #: leave this empty; the GUI applies updates off-thread so long delays
+        #: (e.g. TX power ≥ 1 s) do not freeze the UI.
+        self.rf_program_latency_s: dict[str, float] = {}
 
     @classmethod
     def default_config_path(cls) -> Path | None:
@@ -525,6 +531,12 @@ class RadarDevice(ABC):
         """
         return None
 
+    def _sleep_rf_program(self, key: str) -> None:
+        """Block for configured RF programming latency (call from worker threads)."""
+        delay = float(self.rf_program_latency_s.get(key, 0.0) or 0.0)
+        if delay > 0.0:
+            time.sleep(delay)
+
     def updateHpf(self, cutoff_hz: float) -> None:
         """
         Update the device high-pass filter cutoff frequency.
@@ -536,6 +548,7 @@ class RadarDevice(ABC):
             should program the hardware; the default stores the value on
             ``self.hpf_cutoff_hz``.
         """
+        self._sleep_rf_program("hpf")
         self.hpf_cutoff_hz = float(cutoff_hz)
         self._notify_controls_changed()
 
@@ -550,6 +563,7 @@ class RadarDevice(ABC):
             should program the hardware; the default stores the value on
             ``self.lpf_cutoff_hz``.
         """
+        self._sleep_rf_program("lpf")
         self.lpf_cutoff_hz = float(cutoff_hz)
         self._notify_controls_changed()
 
@@ -562,7 +576,9 @@ class RadarDevice(ABC):
         power_db :
             TX power in dB (GUI: 0–15, 1 dB steps). Real drivers should
             program the PA; default stores ``self.tx_power_db``.
+            Programming often takes ≥ 1 s on real hardware.
         """
+        self._sleep_rf_program("pwr")
         self.tx_power_db = float(power_db)
         self._notify_controls_changed()
 
@@ -576,6 +592,7 @@ class RadarDevice(ABC):
             RX gain in dB (GUI: 26–48, 3 dB steps). Real drivers should
             program the LNA/VGA; default stores ``self.rx_gain_db``.
         """
+        self._sleep_rf_program("gain")
         self.rx_gain_db = float(gain_db)
         self._notify_controls_changed()
 
@@ -591,6 +608,7 @@ class RadarDevice(ABC):
             slope tracks bandwidth / ramp time). Real drivers should program
             the chirp synthesizer.
         """
+        self._sleep_rf_program("chirp_bw")
         bw = float(bandwidth_hz)
         if bw <= 0.0:
             raise ValueError("chirp bandwidth must be positive")
@@ -611,6 +629,7 @@ class RadarDevice(ABC):
             Updates ``self.num_samples`` and ``self.config.num_samples``.
             Real drivers should reprogram the ADC / chirp profile.
         """
+        self._sleep_rf_program("samples")
         n = int(num_samples)
         if n <= 0:
             raise ValueError("num_samples must be positive")
@@ -629,6 +648,7 @@ class RadarDevice(ABC):
             Updates ``self.adc_sample_rate_hz`` and ``self.config.adc_sample_rate_hz``.
             Real drivers should reprogram the ADC clock / profile.
         """
+        self._sleep_rf_program("sample_rate")
         fs = float(sample_rate_hz)
         if fs <= 0.0:
             raise ValueError("sample rate must be positive")
@@ -649,6 +669,7 @@ class RadarDevice(ABC):
         v_max_mps :
             Desired max unambiguous velocity in m/s (one-sided).
         """
+        self._sleep_rf_program("vmax")
         v = float(v_max_mps)
         if v <= 0.0:
             raise ValueError("max velocity must be positive")
@@ -675,6 +696,7 @@ class RadarDevice(ABC):
         dv_mps :
             Desired velocity resolution in m/s.
         """
+        self._sleep_rf_program("dv")
         dv = float(dv_mps)
         if dv <= 0.0:
             raise ValueError("velocity resolution must be positive")
