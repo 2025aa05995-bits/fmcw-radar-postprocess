@@ -273,12 +273,7 @@ class RangeFftTab(MeasurementTab):
         self._frame_hold: dict[int, np.ndarray] = {}
         self._last_rx: list[int] = []
         self._hold_n_bins: int | None = None
-        self._last_hpf_khz: int | None = None
-        self._last_lpf_mhz: int | None = None
-        self._last_tx_pwr_db: int | None = None
-        self._last_rx_gain_db: int | None = None
-        self._last_chirp_bw_hz: float | None = None
-        parent.after_idle(self._push_rf_controls)
+        parent.after_idle(self._sync_rf_controls_from_device)
 
     def _hpf_khz(self) -> int:
         """Current HPF cutoff snapped to the slider step (kHz)."""
@@ -289,25 +284,6 @@ class RangeFftTab(MeasurementTab):
         stepped = int(round(raw / _HPF_KHZ_STEP) * _HPF_KHZ_STEP)
         return int(np.clip(stepped, _HPF_KHZ_MIN, _HPF_KHZ_MAX))
 
-    def _on_hpf_changed(self, _value=None) -> None:
-        """Notify the live device when the HPF cutoff changes."""
-        khz = self._hpf_khz()
-        self._hpf_value_lbl.configure(text=f"HPF {khz} kHz")
-        if self._last_hpf_khz == khz:
-            return
-        self._last_hpf_khz = khz
-        cutoff_hz = float(khz) * 1_000.0
-        device = self.device
-        if device is None:
-            self._hpf_status.configure(text="(no device)")
-            return
-        try:
-            device.updateHpf(cutoff_hz)
-        except Exception as exc:  # noqa: BLE001
-            self._hpf_status.configure(text=f"HPF error: {exc}")
-            return
-        self._hpf_status.configure(text="applied → device")
-
     def _lpf_mhz(self) -> int:
         """Current LPF cutoff snapped to the slider step (MHz)."""
         try:
@@ -316,25 +292,6 @@ class RangeFftTab(MeasurementTab):
             return _LPF_MHZ_MIN
         stepped = int(round(raw / _LPF_MHZ_STEP) * _LPF_MHZ_STEP)
         return int(np.clip(stepped, _LPF_MHZ_MIN, _LPF_MHZ_MAX))
-
-    def _on_lpf_changed(self, _value=None) -> None:
-        """Notify the live device when the LPF cutoff changes."""
-        mhz = self._lpf_mhz()
-        self._lpf_value_lbl.configure(text=f"LPF {mhz} MHz")
-        if self._last_lpf_mhz == mhz:
-            return
-        self._last_lpf_mhz = mhz
-        cutoff_hz = float(mhz) * 1_000_000.0
-        device = self.device
-        if device is None:
-            self._lpf_status.configure(text="(no device)")
-            return
-        try:
-            device.updateLpf(cutoff_hz)
-        except Exception as exc:  # noqa: BLE001
-            self._lpf_status.configure(text=f"LPF error: {exc}")
-            return
-        self._lpf_status.configure(text="applied → device")
 
     def _tx_pwr_db(self) -> int:
         try:
@@ -351,44 +308,162 @@ class RangeFftTab(MeasurementTab):
             return _RX_GAIN_DB_MIN
         return min(_RX_GAIN_DB_VALUES, key=lambda v: abs(v - raw))
 
+    def _set_hpf_ui(self, khz: int) -> None:
+        self._suppress_setting_events = True
+        try:
+            self.hpf_var.set(float(khz))
+            self._hpf_value_lbl.configure(text=f"HPF {khz} kHz")
+        finally:
+            self._suppress_setting_events = False
+
+    def _set_lpf_ui(self, mhz: int) -> None:
+        self._suppress_setting_events = True
+        try:
+            self.lpf_var.set(float(mhz))
+            self._lpf_value_lbl.configure(text=f"LPF {mhz} MHz")
+        finally:
+            self._suppress_setting_events = False
+
+    def _set_tx_pwr_ui(self, db: int) -> None:
+        self._suppress_setting_events = True
+        try:
+            self.tx_pwr_var.set(float(db))
+            self.tx_pwr_value_lbl.configure(text=f"{db} dB")
+        finally:
+            self._suppress_setting_events = False
+
+    def _set_rx_gain_ui(self, db: int) -> None:
+        self._suppress_setting_events = True
+        try:
+            self.rx_gain_var.set(float(db))
+            self.rx_gain_value_lbl.configure(text=f"{db} dB")
+        finally:
+            self._suppress_setting_events = False
+
+    def _set_chirp_bw_ui(self, bw_hz: float) -> None:
+        dr = self._dr_m_from_bw_hz(bw_hz)
+        self._suppress_setting_events = True
+        try:
+            self.dr_var.set(dr)
+            self._dr_value_lbl.configure(text=f"{dr:.2f} m | {bw_hz / 1e9:.2f} GHz")
+        finally:
+            self._suppress_setting_events = False
+
+    def _request_setting(
+        self,
+        key: str,
+        value,
+        *,
+        label: str,
+        unit: str,
+        apply,
+        revert,
+        status_lbl: ttk.Label | None = None,
+        equal=None,
+        on_applied=None,
+    ) -> None:
+        ctrl = self.settings
+        if ctrl is None:
+            if status_lbl is not None:
+                status_lbl.configure(text="(no settings)")
+            return
+
+        def _on_discarded(committed) -> None:
+            revert(committed)
+            if status_lbl is not None:
+                status_lbl.configure(text="busy — restored")
+
+        def _on_applied(applied) -> None:
+            if status_lbl is not None:
+                status_lbl.configure(text="applied → device")
+            if on_applied is not None:
+                on_applied(applied)
+
+        def _on_error(exc: BaseException) -> None:
+            if status_lbl is not None:
+                status_lbl.configure(text=f"error: {exc}")
+
+        started = ctrl.request(
+            key,
+            value,
+            label=label,
+            unit=unit,
+            apply=apply,
+            equal=equal,
+            on_applied=_on_applied,
+            on_discarded=_on_discarded,
+            on_error=_on_error,
+        )
+        if started and status_lbl is not None:
+            status_lbl.configure(text="applying…")
+
+    def _on_hpf_changed(self, _value=None) -> None:
+        """Queue HPF cutoff to the device (non-blocking)."""
+        if self._suppress_setting_events:
+            return
+        khz = self._hpf_khz()
+        self._hpf_value_lbl.configure(text=f"HPF {khz} kHz")
+        cutoff_hz = float(khz) * 1_000.0
+        self._request_setting(
+            "hpf_khz",
+            khz,
+            label="HPF",
+            unit="kHz",
+            apply=lambda d, hz=cutoff_hz: d.updateHpf(hz),
+            revert=lambda v: self._set_hpf_ui(int(v)),
+            status_lbl=self._hpf_status,
+            equal=lambda a, b: int(a) == int(b),
+        )
+
+    def _on_lpf_changed(self, _value=None) -> None:
+        """Queue LPF cutoff to the device (non-blocking)."""
+        if self._suppress_setting_events:
+            return
+        mhz = self._lpf_mhz()
+        self._lpf_value_lbl.configure(text=f"LPF {mhz} MHz")
+        cutoff_hz = float(mhz) * 1_000_000.0
+        self._request_setting(
+            "lpf_mhz",
+            mhz,
+            label="LPF",
+            unit="MHz",
+            apply=lambda d, hz=cutoff_hz: d.updateLpf(hz),
+            revert=lambda v: self._set_lpf_ui(int(v)),
+            status_lbl=self._lpf_status,
+            equal=lambda a, b: int(a) == int(b),
+        )
+
     def _on_tx_pwr_changed(self, _value=None) -> None:
-        """Notify the live device when TX power changes."""
+        """Queue TX power to the device (non-blocking; HW often ≥ 1 s)."""
+        if self._suppress_setting_events:
+            return
         db = self._tx_pwr_db()
         self.tx_pwr_value_lbl.configure(text=f"{db} dB")
-        if self._last_tx_pwr_db == db:
-            return
-        self._last_tx_pwr_db = db
-        device = self.device
-        if device is None:
-            return
-        try:
-            device.updatePwr(float(db))
-        except Exception:  # noqa: BLE001
-            return
+        self._request_setting(
+            "tx_pwr_db",
+            db,
+            label="TX power",
+            unit="dB",
+            apply=lambda d, v=float(db): d.updatePwr(v),
+            revert=lambda v: self._set_tx_pwr_ui(int(v)),
+            equal=lambda a, b: int(a) == int(b),
+        )
 
     def _on_rx_gain_changed(self, _value=None) -> None:
-        """Notify the live device when RX gain changes."""
+        """Queue RX gain to the device (non-blocking)."""
+        if self._suppress_setting_events:
+            return
         db = self._rx_gain_db()
         self.rx_gain_value_lbl.configure(text=f"{db} dB")
-        if self._last_rx_gain_db == db:
-            return
-        self._last_rx_gain_db = db
-        device = self.device
-        if device is None:
-            return
-        try:
-            device.updateGain(float(db))
-        except Exception:  # noqa: BLE001
-            return
-
-    def _push_rf_controls(self) -> None:
-        """Push HPF / LPF / TX / RX / chirp BW to the current device."""
-        self._sync_chirp_bw_slider_from_device()
-        self._on_chirp_bw_changed()
-        self._on_hpf_changed()
-        self._on_lpf_changed()
-        self._on_tx_pwr_changed()
-        self._on_rx_gain_changed()
+        self._request_setting(
+            "rx_gain_db",
+            db,
+            label="RX gain",
+            unit="dB",
+            apply=lambda d, v=float(db): d.updateGain(v),
+            revert=lambda v: self._set_rx_gain_ui(int(v)),
+            equal=lambda a, b: int(a) == int(b),
+        )
 
     def _dr_m_from_bw_hz(self, bandwidth_hz: float) -> float:
         """Convert chirp bandwidth (Hz) to snapped range resolution (m)."""
@@ -403,18 +478,10 @@ class RangeFftTab(MeasurementTab):
         bw = SPEED_OF_LIGHT / (2.0 * dr)
         return float(np.clip(bw, _CHIRP_BW_HZ_MIN, _CHIRP_BW_HZ_MAX))
 
-    def _sync_chirp_bw_slider_from_device(self) -> None:
-        """Initialize the range-resolution slider from the device chirp bandwidth."""
-        device = self.device
-        if device is None:
-            return
-        bw = float(getattr(device, "chirp_bandwidth_hz", device.config.bandwidth_hz))
-        dr = self._dr_m_from_bw_hz(bw)
-        self.dr_var.set(dr)
-        self._dr_value_lbl.configure(text=f"{dr:.2f} m | {bw / 1e9:.2f} GHz")
-
     def _on_chirp_bw_changed(self, _value=None) -> None:
-        """Map range-resolution slider → ``device.updateChirpBw``."""
+        """Queue chirp bandwidth from the range-resolution slider (non-blocking)."""
+        if self._suppress_setting_events:
+            return
         try:
             dr = float(self.dr_var.get())
         except (TypeError, ValueError, tk.TclError):
@@ -422,17 +489,65 @@ class RangeFftTab(MeasurementTab):
         dr = float(np.clip(round(dr / _DR_M_STEP) * _DR_M_STEP, _DR_M_FINE, _DR_M_COARSE))
         bw = self._bw_hz_from_dr_m(dr)
         self._dr_value_lbl.configure(text=f"{dr:.2f} m | {bw / 1e9:.2f} GHz")
-        if self._last_chirp_bw_hz is not None and abs(self._last_chirp_bw_hz - bw) < 1.0:
-            return
-        self._last_chirp_bw_hz = bw
+        self._request_setting(
+            "chirp_bw_hz",
+            bw,
+            label="Chirp BW",
+            unit="Hz",
+            apply=lambda d, v=bw: d.updateChirpBw(v),
+            revert=lambda v: self._set_chirp_bw_ui(float(v)),
+            status_lbl=self._dr_status,
+            equal=lambda a, b: abs(float(a) - float(b)) < 1.0,
+            on_applied=lambda _v: self.reset_frame_hold(),
+        )
+
+    def _sync_rf_controls_from_device(self) -> None:
+        """Mirror device RF state into sliders and seed the settings tracker."""
         device = self.device
+        ctrl = self.settings
         if device is None:
             return
-        try:
-            device.updateChirpBw(bw)
-        except Exception:  # noqa: BLE001
-            return
-        self.reset_frame_hold()
+
+        hpf_khz = int(
+            np.clip(
+                round(float(device.hpf_cutoff_hz) / 1000.0 / _HPF_KHZ_STEP)
+                * _HPF_KHZ_STEP,
+                _HPF_KHZ_MIN,
+                _HPF_KHZ_MAX,
+            )
+        )
+        lpf_mhz = int(
+            np.clip(
+                round(float(device.lpf_cutoff_hz) / 1e6 / _LPF_MHZ_STEP) * _LPF_MHZ_STEP,
+                _LPF_MHZ_MIN,
+                _LPF_MHZ_MAX,
+            )
+        )
+        tx = int(
+            np.clip(
+                round(float(device.tx_power_db) / _TX_PWR_DB_STEP) * _TX_PWR_DB_STEP,
+                _TX_PWR_DB_MIN,
+                _TX_PWR_DB_MAX,
+            )
+        )
+        rx = min(_RX_GAIN_DB_VALUES, key=lambda v: abs(v - float(device.rx_gain_db)))
+        bw = float(getattr(device, "chirp_bandwidth_hz", device.config.bandwidth_hz))
+
+        self._set_hpf_ui(hpf_khz)
+        self._set_lpf_ui(lpf_mhz)
+        self._set_tx_pwr_ui(tx)
+        self._set_rx_gain_ui(rx)
+        self._set_chirp_bw_ui(bw)
+        self._hpf_status.configure(text="")
+        self._lpf_status.configure(text="")
+        self._dr_status.configure(text="")
+
+        if ctrl is not None:
+            ctrl.seed("hpf_khz", hpf_khz, label="HPF", unit="kHz")
+            ctrl.seed("lpf_mhz", lpf_mhz, label="LPF", unit="MHz")
+            ctrl.seed("tx_pwr_db", tx, label="TX power", unit="dB")
+            ctrl.seed("rx_gain_db", rx, label="RX gain", unit="dB")
+            ctrl.seed("chirp_bw_hz", bw, label="Chirp BW", unit="Hz")
 
     def _on_plot_draw(self, _event=None) -> None:
         self._align_filter_sliders()
@@ -472,13 +587,8 @@ class RangeFftTab(MeasurementTab):
         return float(freq_hz * SPEED_OF_LIGHT / (2.0 * frame.config.chirp_slope))
 
     def on_device_changed(self) -> None:
-        """Re-apply RF controls to the newly selected device."""
-        self._last_hpf_khz = None
-        self._last_lpf_mhz = None
-        self._last_tx_pwr_db = None
-        self._last_rx_gain_db = None
-        self._last_chirp_bw_hz = None
-        self._push_rf_controls()
+        """Re-sync RF controls from the newly selected device (no blocking apply)."""
+        self._sync_rf_controls_from_device()
 
     def reset_frame_hold(self) -> None:
         """Clear frame-to-frame max-hold profiles."""

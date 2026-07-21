@@ -45,6 +45,19 @@ class DummyDevice(RadarDevice):
         super().__init__(config, config_path=config_path, **kwargs)
         # TODO: store port, baud, SDK options from kwargs
         self._handle: Any = None
+        # Model real RF programming time (TX power typically ≥ 1 s).
+        # The live GUI applies these off the UI thread.
+        self.rf_program_latency_s = {
+            "pwr": float(kwargs.get("pwr_latency_s", 1.0)),
+            "gain": float(kwargs.get("gain_latency_s", 0.25)),
+            "hpf": float(kwargs.get("hpf_latency_s", 0.15)),
+            "lpf": float(kwargs.get("lpf_latency_s", 0.15)),
+            "chirp_bw": float(kwargs.get("chirp_bw_latency_s", 0.2)),
+            "samples": float(kwargs.get("samples_latency_s", 0.2)),
+            "sample_rate": float(kwargs.get("sample_rate_latency_s", 0.2)),
+            "vmax": float(kwargs.get("vmax_latency_s", 0.2)),
+            "dv": float(kwargs.get("dv_latency_s", 0.15)),
+        }
 
     @classmethod
     def default_config_path(cls) -> Path | None:

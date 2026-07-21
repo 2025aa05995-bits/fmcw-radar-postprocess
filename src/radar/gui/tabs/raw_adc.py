@@ -70,8 +70,6 @@ class RawAdcTab(MeasurementTab):
         self._last_rx: list[int] = []
         self._last_n_samples: int | None = None
         self._last_fs_hz: float | None = None
-        self._last_samples_setting: int | None = None
-        self._last_rate_setting: float | None = None
         parent.after_idle(self._sync_controls_from_device)
 
     def _snap_samples(self, n: int) -> int:
@@ -82,74 +80,111 @@ class RawAdcTab(MeasurementTab):
         """Snap ``fs_hz`` to the nearest allowed rate option."""
         return min(_RATE_OPTIONS, key=lambda item: abs(item[1] - float(fs_hz)))
 
+    def _set_samples_ui(self, n: int) -> None:
+        self._suppress_setting_events = True
+        try:
+            self.samples_var.set(str(int(n)))
+        finally:
+            self._suppress_setting_events = False
+
+    def _set_rate_ui(self, fs_hz: float) -> None:
+        label, _ = self._snap_rate(fs_hz)
+        self._suppress_setting_events = True
+        try:
+            self.rate_var.set(label)
+        finally:
+            self._suppress_setting_events = False
+
     def _sync_controls_from_device(self) -> None:
         """Initialize Samples / Sample-rate dropdowns from the live device config."""
         device = self.device
         if device is None:
             return
 
-        n = int(getattr(device, "num_samples", device.config.num_samples))
-        snapped_n = self._snap_samples(n)
-        self.samples_var.set(str(snapped_n))
-        self._last_samples_setting = None
-        self._on_samples_changed()
+        n = self._snap_samples(
+            int(getattr(device, "num_samples", device.config.num_samples))
+        )
+        self._set_samples_ui(n)
 
         fs = float(
             getattr(device, "adc_sample_rate_hz", device.config.adc_sample_rate_hz)
         )
-        label, _ = self._snap_rate(fs)
-        self.rate_var.set(label)
-        self._last_rate_setting = None
-        self._on_rate_changed()
+        label, snapped_fs = self._snap_rate(fs)
+        self._set_rate_ui(snapped_fs)
+
+        ctrl = self.settings
+        if ctrl is not None:
+            ctrl.seed("num_samples", n, label="Samples", unit="")
+            ctrl.seed("sample_rate_hz", snapped_fs, label="Sample rate", unit="Hz")
 
     def _on_samples_changed(self, _event=None) -> None:
-        """Push the selected sample count to ``device.updateSamples``."""
+        """Queue sample count to the device (non-blocking)."""
+        if self._suppress_setting_events:
+            return
         try:
             n = int(self.samples_var.get())
         except (TypeError, ValueError):
             return
         if n not in _SAMPLE_OPTIONS:
             n = self._snap_samples(n)
-            self.samples_var.set(str(n))
-        if self._last_samples_setting == n:
+            self._set_samples_ui(n)
+
+        ctrl = self.settings
+        if ctrl is None:
             return
-        self._last_samples_setting = n
-        device = self.device
-        if device is None:
-            return
-        try:
-            device.updateSamples(n)
-        except Exception:  # noqa: BLE001
-            return
-        # Force waveform rebuild — cube length will change on next frame.
-        self._lines = []
-        self._last_n_samples = None
+
+        def _revert(committed) -> None:
+            self._set_samples_ui(int(committed))
+
+        def _applied(_v) -> None:
+            self._lines = []
+            self._last_n_samples = None
+
+        ctrl.request(
+            "num_samples",
+            n,
+            label="Samples",
+            apply=lambda d, v=n: d.updateSamples(v),
+            equal=lambda a, b: int(a) == int(b),
+            on_applied=_applied,
+            on_discarded=_revert,
+            on_error=lambda _e: _revert(ctrl.committed("num_samples", n)),
+        )
 
     def _on_rate_changed(self, _event=None) -> None:
-        """Push the selected sample rate to ``device.updateSampleRate``."""
+        """Queue sample rate to the device (non-blocking)."""
+        if self._suppress_setting_events:
+            return
         label = self.rate_var.get()
         fs = _RATE_BY_LABEL.get(label)
         if fs is None:
             label, fs = self._snap_rate(40e6)
-            self.rate_var.set(label)
-        if self._last_rate_setting == fs:
+            self._set_rate_ui(fs)
+
+        ctrl = self.settings
+        if ctrl is None:
             return
-        self._last_rate_setting = fs
-        device = self.device
-        if device is None:
-            return
-        try:
-            device.updateSampleRate(fs)
-        except Exception:  # noqa: BLE001
-            return
-        # Force time-axis rebuild — µs scale depends on fs.
-        self._lines = []
-        self._last_fs_hz = None
+
+        def _revert(committed) -> None:
+            self._set_rate_ui(float(committed))
+
+        def _applied(_v) -> None:
+            self._lines = []
+            self._last_fs_hz = None
+
+        ctrl.request(
+            "sample_rate_hz",
+            fs,
+            label="Sample rate",
+            unit="Hz",
+            apply=lambda d, v=fs: d.updateSampleRate(v),
+            on_applied=_applied,
+            on_discarded=_revert,
+            on_error=lambda _e: _revert(ctrl.committed("sample_rate_hz", fs)),
+        )
 
     def on_device_changed(self) -> None:
         """Re-sync samples / rate from the newly selected device."""
-        self._last_samples_setting = None
-        self._last_rate_setting = None
         self._sync_controls_from_device()
 
     def update(self, frame: RadarFrame) -> None:
